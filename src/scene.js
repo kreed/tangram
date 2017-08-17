@@ -25,6 +25,8 @@ import CanvasText from './styles/text/canvas_text';
 import FontManager from './styles/text/font_manager';
 import MediaCapture from './utils/media_capture';
 
+import work from 'webworkify';
+
 // Load scene definition: pass an object directly, or a URL as string to load remotely
 export default class Scene {
 
@@ -257,42 +259,10 @@ export default class Scene {
         this.media_capture.setCanvas(this.canvas, this.gl);
     }
 
-    // Get the URL to load the web worker from
-    getWorkerUrl() {
-        let worker_url;
-        /* jshint -W117 */
-        // ignore uninitialized worker src variable (defined in parent scope)
-        if (typeof __worker_src__ !== "undefined"){
-            let source = '(' + __worker_src__ + ')()';
-            if (__worker_src_origin__ && __worker_src_map__ !== '') {
-                let origin = __worker_src_origin__.slice(0, __worker_src_origin__.lastIndexOf('/')+1);
-                source += '\n//#' + ' sourceMappingURL=' + origin + __worker_src_map__;
-            }
-            worker_url = URLs.createObjectURL(new Blob([source], { type: 'application/javascript' }));
-        }
-        /* jshint +W117 */
-
-        if (!worker_url) {
-            throw new Error("Couldn't find internal Tangram source variable (may indicate the library did not build correctly)");
-        }
-
-        // Import custom data source scripts alongside core library
-        // NOTE: workaround for issue where large libraries intermittently fail to load in web workers,
-        // when multiple importScripts() calls are used. Loading all scripts (including Tangram itself)
-        // in one call at at worker creation time has not exhibited the same issue.
-        let urls = [...this.data_source_scripts];
-        urls.push(worker_url); // load Tangram *last* (has been more reliable, though reason unknown)
-        let body = `importScripts(${urls.map(url => `'${url}'`).join(',')});`;
-        return URLs.createObjectURL(new Blob([body], { type: 'application/javascript' }));
-    }
-
     // Update list of any custom data source scripts (if any)
     updateDataSourceScripts () {
         let prev_scripts = [...(this.data_source_scripts||[])]; // save list of previously loaded scripts
         let scripts = Object.keys(this.config.sources).map(s => this.config.sources[s].scripts).filter(x => x);
-        if (scripts.length > 0) {
-            log('debug', 'loading custom data source scripts in worker:', scripts);
-        }
         this.data_source_scripts = [].concat(...scripts).sort();
 
         // Scripts changed?
@@ -308,28 +278,27 @@ export default class Scene {
         }
 
         if (!this.workers) {
-            return this.makeWorkers(this.getWorkerUrl());
+            return this.makeWorkers();
         }
         return Promise.resolve();
     }
 
     // Instantiate workers from URL, init event handlers
-    makeWorkers(url) {
-
+    makeWorkers() {
         // Let VertexElements know if 32 bit indices for element arrays are available
         let has_element_index_uint = this.gl.getExtension("OES_element_index_uint") ? true : false;
 
         let queue = [];
         this.workers = [];
         for (var id=0; id < this.num_workers; id++) {
-            var worker = new Worker(url);
+            var worker = work(require('./scene_worker.js'));
             this.workers[id] = worker;
 
             WorkerBroker.addWorker(worker);
 
             log('debug', `Scene.makeWorkers: initializing worker ${id}`);
             let _id = id;
-            queue.push(WorkerBroker.postMessage(worker, 'self.init', this.id, id, this.num_workers, this.log_level, Utils.device_pixel_ratio, has_element_index_uint).then(
+            queue.push(WorkerBroker.postMessage(worker, 'self.init', this.id, id, this.num_workers, this.log_level, Utils.device_pixel_ratio, has_element_index_uint, this.data_source_scripts).then(
                 (id) => {
                     log('debug', `Scene.makeWorkers: initialized worker ${id}`);
                     return id;
@@ -346,7 +315,7 @@ export default class Scene {
             log.setWorkers(this.workers);
 
             // Free memory after worker initialization
-            URLs.revokeObjectURL(url);
+            this.workers.forEach(w => URLs.revokeObjectURL(w.objectURL));
         });
     }
 
